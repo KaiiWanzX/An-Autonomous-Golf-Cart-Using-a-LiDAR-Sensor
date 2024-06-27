@@ -1,0 +1,29 @@
+#!/usr/bin/env python3
+
+from launch import LaunchDescription
+from launch_ros.actions import Node
+
+def generate_launch_description():
+    return LaunchDescription([
+        Node(
+            package='jetsper_controller',
+            executable='steering_control',
+            name='steering_control'
+        ),
+        Node(
+            package='jetsper_controller',
+            executable='pid_driving_control',
+            name='pid_driving_control'
+        ),
+        Node(
+            package='jetsper_controller',
+            executable='brake_control',
+            name='brake_control'
+        )
+    ])
+
+#Node(
+#            package='jetsper_controller',
+#            executable='odom_publisher',
+#            name='odom_publisher'
+#        ),

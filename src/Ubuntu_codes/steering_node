@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Float64
+
+import can
+import os 
+import time
+
+os.system('sudo ifconfig con0 down')
+os.system('sudo ip link set can0 type can bitrate 250000')
+os.system('sudo ifconfig can0 txqueuelen 250000') 
+os.system('sudo ifconfig can0 up')
+
+print(os.name)
+can0 = can.interface.Bus(channel = 'can0', bustype = 'socketcan')
+
+class SteeringNode(Node):
+
+    def __init__(self):
+        super().__init__("steering_control_node")
+        self.get_logger().info("steering control node starts :)")
+        self.angle = 0.0
+        self.normalized_angle_dec = 0.0
+        self.normalized_angle_hex = 0.0
+        self.data_Hh = 0.0
+        self.data_Hl = 0.0
+        self.data_Lh = 0.0
+        self.data_Ll = 0.0
+        self.prev_angle_ = 0
+
+        self.angle_subscriber_ = self.create_subscription(Float64, "/steering_angle_setpoint", self.angle_callback, 10)
+
+    def angle_callback(self, msg: Float64):
+        self.get_logger().info(str(msg))
+        if msg.data == 555.0:
+            
+            msg_disable = can.Message( arbitration_id=0x06000001, data= [0x23,0x0C,0x20,0x01,0x00,0x00,0x00,0x00]) #not sure ;-;
+            can0.send(msg_disable)
+            print("sent: {}".format(msg_disable))
+
+            can0.shutdown()
+            rclpy.shutdown()
+
+        elif msg.data != self.prev_angle_:
+            self.prev_angle_ = msg.data
+            self.angle = self.prev_angle_
+            
+            #normalize dec angle
+            self.normalized_angle_dec = self.angle * 27
+
+            #convert into hexadecimal
+            self.normalized_angle_hex = ('{:0>8x}'.format(int(self.normalized_angle_dec) & (2**32-1)))
+
+            #separates into digits
+            self.data_Hh = ((int(self.normalized_angle_hex[0:2],16)))
+            self.data_Hl = ((int(self.normalized_angle_hex[2:4],16)))
+            self.data_Lh = ((int(self.normalized_angle_hex[4:6],16)))
+            self.data_Ll = ((int(self.normalized_angle_hex[6:8],16)))
+
+            #sent to steering motor
+            self.angle_sent = can.Message( arbitration_id=0x06000001, data= [0x23,0x02,0x20,0x01,(self.data_Lh),(self.data_Ll),(self.data_Hh),(self.data_Hl)] )
+            can0.send(self.angle_sent)
+            print("sent: " + str(self.angle) + "as {}".format(self.angle_sent))
+
+        else:
+            pass
+        
+
+
+def main(args=None):
+    
+    rclpy.init(args=args)
+
+    """
+    #set the Jetson's baud rate to 250k
+    os.system('sudo ifconfig con0 down')
+    os.system('sudo ip link set can0 type can bitrate 250000')
+    os.system('sudo ifconfig can0 txqueuelen 250000')
+    os.system('sudo ifconfig can0 up')
+    print(os.name)
+    """
+    
+
+    #enable steering
+    # can0 = can.interface.Bus(channel = 'can0', bustype = 'socketcan')
+    msg_enable = can.Message( arbitration_id=0x06000001, data= [0x23,0x0d,0x20,0x01,0x00,0x00,0x00,0x00])
+    can0.send(msg_enable)
+    print("sent: {}".format(msg_enable))
+
+    #set steering to 0 degree
+    msg_0 = can.Message( arbitration_id=0x06000001, data= [0x23,0x02,0x20,0x01,0x00,0x00,0x00,0x00])
+    can0.send(msg_0)
+    print("sent: {}".format(msg_0))
+    
+    #spin subscriber node (publish in the same time)
+    node = SteeringNode()
+    rclpy.spin(node)
+
+    #disable steering motor 
+    msg_disable = can.Message( arbitration_id=0x06000001, data= [0x23,0x0C,0x20,0x01,0x00,0x00,0x00,0x00]) #not sure ;-;
+    can0.send(msg_disable)
+    print("sent: {}".format(msg_disable))
+
+    can0.shutdown()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
+

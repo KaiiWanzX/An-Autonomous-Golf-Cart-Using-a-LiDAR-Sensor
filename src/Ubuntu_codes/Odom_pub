@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Int32
+from std_msgs.msg import Float64
+import math
+
+#odom
+from geometry_msgs.msg import TransformStamped
+from nav_msgs.msg import Odometry
+
+class OdometryPublisherNode(Node):
+    def __init__(self):
+        super().__init__("odom_publisher")
+        
+        # speed_setpoint_feedback subscription
+        self.speed_feedback_ = self.create_subscription(Float64, "/current_speed_for_odom_cal", self.feedback_callback, 20)
+
+        # steering angle subscription
+        self.steering_sub_ = self.create_subscription(Float64, "/steering_for_odom_cal", self.steering_callback, 20)
+
+        # odometry & transformstamped publisher
+        self.odom_pub_ = self.create_publisher(Odometry, '/odom', 20)
+        self.tf_pub_ = self.create_publisher(TransformStamped, '/tf', 20)
+        self.timer_ = self.create_timer(0.2, self.send_odom_command)
+
+        # control logics
+        self.speed_ = 0.0
+        self.angle_ = 0.0
+        self.odom_frame_ = self.declare_parameter('odom_frame', 'odom').value
+        self.base_frame_ = self.declare_parameter('base_frame', 'base_link').value
+        self.x_ = 0.0
+        self.y_ = 0.0
+        self.yaw_ = 0.0
+        self.odom_last_state = None
+
+        self.get_logger().info("odom publisher node starts :)")
+
+    def steering_callback(self, msg: Float64):
+        self.angle_ = msg.data
+
+    def feedback_callback(self, msg: Float64):
+        self.speed_ = (msg.data * 5 / 18)
+
+    def send_odom_command(self):
+        # rcv time
+        current_time = self.get_clock().now()
+        
+        #current_speed = float(self.speed_rcv * 24 / (255*3.6))  
+        current_speed = self.speed_
+        #current_steering_angle = self.angle_
+        current_steering_angle = 0.0
+        radian_current_steering_angle = math.radians(current_steering_angle)
+        wheelbase = 1.65 #meters, distance from front wheels to rear wheels.
+        current_angular_velocity = current_speed * math.tan(radian_current_steering_angle) / wheelbase
+        dt = 0.2 #sec
+
+        x_dot = current_speed * math.cos(self.yaw_)
+        y_dot = current_speed * math.sin(self.yaw_)
+        self.x_ += x_dot * dt
+        self.y_ += y_dot * dt
+        self.yaw_ += current_angular_velocity * dt
+
+        # odometry messages
+        odom = Odometry()
+        odom.header.frame_id = self.odom_frame_
+        odom.header.stamp = current_time.to_msg()
+        odom.child_frame_id = self.base_frame_
+
+        # position messages
+        odom.pose.pose.position.x = self.x_
+        odom.pose.pose.position.y = self.y_
+        odom.pose.pose.orientation.x = 0.0
+        odom.pose.pose.orientation.y = 0.0
+        odom.pose.pose.orientation.z = math.sin(self.yaw_ / 2.0)
+        #odom.pose.pose.orientation.w = math.cos(self.yaw_ / 2.0)
+        odom.pose.pose.orientation.w = 0.0
+
+        # velocity
+        odom.twist.twist.linear.x = current_speed
+        odom.twist.twist.linear.y = 0.0
+        odom.twist.twist.angular.z = current_angular_velocity
+
+        # position uncertainly
+        # not for now :)
+
+        # broadcast tf
+        tf = TransformStamped()
+        tf.header.stamp = current_time.to_msg()
+        tf.header.frame_id = self.odom_frame_
+        tf.child_frame_id = self.base_frame_
+        tf.transform.translation.x = self.x_
+        tf.transform.translation.y = self.y_
+        tf.transform.translation.z = 0.0
+        tf.transform.rotation.x = 0.0
+        tf.transform.rotation.y = 0.0
+        tf.transform.rotation.z = math.sin(self.yaw_ / 2.0)
+        tf.transform.rotation.w = 0.0
+        
+        self.tf_pub_.publish(tf)
+        self.odom_pub_.publish(odom)
+
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = OdometryPublisherNode()
+    rclpy.spin(node)
+    rclpy.shutdown()

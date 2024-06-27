@@ -1,0 +1,396 @@
+// PID Control with DIGI POT 5 click, analog read for speed feedback , fix the sft_val bug on 15/06/24
+// interfacing with ROS 2
+// upload to arduino mkr zero
+
+#include <micro_ros_arduino.h>
+#include <stdio.h>
+#include <rcl/rcl.h>
+#include <rcl/error_handling.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+#include <std_msgs/msg/int32.h>
+
+#include <SPI.h>
+
+// Ros 2 node part
+rcl_subscription_t subscriber;
+rcl_publisher_t publisher;
+std_msgs__msg__Int32 sub_msg;
+std_msgs__msg__Int32 pub_msg;
+rclc_executor_t executor;
+rclc_support_t support;
+rcl_allocator_t allocator;
+rcl_node_t node;
+rcl_timer_t pub_timer;
+
+#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop();}}
+#define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}
+#define LED_PIN 13
+
+// input pins
+#define mcor_in A0  // speed pedal outputs
+#define speed_in A1 // encoder
+#define fw_in 0     // forward gear
+#define rv_in 1     // baackward gear
+#define sft_in 7    // Being HIGH when speed pedal is pressed
+
+// output pins
+#define sft_out 2  // to generate pedal pressing status
+#define fw_out 3
+#define rv_out 4
+#define mcor_out 5 // to generate mcor output
+
+/* NOTE:
+ SI,MOSI  8
+ CS 5 = mcor_out <pwm>
+ SCLK,SCK 9
+*/
+
+// sampling logics
+uint8_t change=0;
+float time_samp=0.0;
+float old_time_samp=0.0;
+
+// feedback datas
+double period=0.0;
+double f=0.0; // frequency
+unsigned int ppr=25; // pulse per round/rev, randomly set to 500 xD //25
+unsigned int rpm=0; // round per minute
+float kmperhr=0.0;
+float km=0.0;
+float gear_ratio=9.5; // randomly set to 1
+float disperrev=0.001413; // in km
+
+// driving part
+const byte address = 00010000; // B00010001 in binary, 0x11
+uint8_t speed_val = 150; // set point
+uint8_t fw_val=1;
+uint8_t rv_val=0;
+uint8_t sft_val;
+uint8_t speed_change=0; // to literally make cs/mcor_out output to 0V
+uint8_t first_drive=0;
+
+// speed control part
+float currentSpeed=0;
+int speed_mps = 0;
+float sp_speed=0.0;
+float adj_speed=0.0;
+float adj_calc=0.0;
+long prev=0.0;
+long dT=0.0;
+float Kp=1.0; float Ki=1.0; float Kd=0.25; // old_Kp = 6.3, old_Ki = 0.0047, old_Kd = 4; Ziegler-Nichols Method gain-->3.5,0.0015,1.7
+uint8_t kp_check=0;
+float preverror=0.0;
+float prevadj=0.0;
+long previousMillis = 0.0;          // like delay
+long currentMillis = 0.0;           // like delay
+int interval = 200;
+float sum_error=0.0;
+
+int count = 0;
+int start = 0;
+
+// subscribe's part
+void error_loop(){
+  while(1){
+    digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+    delay(100);
+  }
+}
+
+void subscription_callback(const void * msgin)
+{  
+  const std_msgs__msg__Int32 * msg = (const std_msgs__msg__Int32 *)msgin;
+  digitalWrite(LED_PIN, (msg->data == 0) ? LOW : HIGH);  
+
+  float speed_desired = msg->data;
+  if(speed_desired >= 0.0 && speed_desired <= 255.0 ) // speed's min and max == 80.0 && 220.0 respectively.
+  {
+    sp_speed = speed_desired;
+    if( sp_speed >= 130.0)
+    {
+      sp_speed = 130.0;
+    }
+  }else{
+    digitalWrite(LED_PIN, HIGH);
+    sp_speed = 0.0;
+  }
+}
+
+void publisher_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
+{  
+  RCLC_UNUSED(last_call_time);
+  if (timer != NULL)
+  {
+    //pub_msg.data = kmperhr;
+    //pub_msg.data = sp_speed;
+    pub_msg.data = speed_mps;
+    RCSOFTCHECK(rcl_publish(&publisher, &pub_msg, NULL));
+    //pub_msg.data++;
+  }
+}
+
+void setup() {
+  /********** ros 2 node ***************/
+  set_microros_transports();
+ 
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, HIGH);  
+  delay(2000);
+
+  allocator = rcl_get_default_allocator();
+ 
+  //create init_options
+  RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
+
+  // create node
+  RCCHECK(rclc_node_init_default(&node, "speed_control_node", "", &support));
+
+  // create subscriber
+  RCCHECK(rclc_subscription_init_default(
+    &subscriber,
+    &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+    "/speed_setpoint_topic"));
+
+  // create publisher
+  RCCHECK(rclc_publisher_init_default(
+    &publisher,
+    &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+    "/current_speed_feedback_topic"));  
+
+  // create timer
+  const unsigned int timer_timeout = 200;
+  RCCHECK(rclc_timer_init_default(
+    &pub_timer,
+    &support,
+    RCL_MS_TO_NS(timer_timeout),
+    publisher_timer_callback));
+
+  // create executor
+  RCCHECK(rclc_executor_init(&executor, &support.context, 2, &allocator));
+  RCCHECK(rclc_executor_add_subscription(&executor, &subscriber, &sub_msg, &subscription_callback, ON_NEW_DATA));
+  RCCHECK(rclc_executor_add_timer(&executor, &pub_timer));
+
+  pub_msg.data = 0;
+ 
+  /********** pinMode setting **********/
+  pinMode(mcor_in, INPUT);
+  pinMode(sft_in, INPUT);
+  pinMode(fw_in, INPUT);
+  pinMode(rv_in, INPUT);
+  pinMode(speed_in, INPUT);
+ 
+  pinMode(mcor_out, OUTPUT);
+  pinMode(sft_out, OUTPUT);
+  pinMode(fw_out, OUTPUT);
+  pinMode(rv_out, OUTPUT);  
+ 
+  /********** gear's logics setting **********/
+  digitalWrite(sft_out, LOW);
+  digitalWrite(fw_out, LOW);
+  digitalWrite(rv_out, LOW);
+
+  /********** SPI setting **********/
+  digitalWrite(mcor_out, HIGH); // Active Low
+  sft_val = 0;
+  SPI.begin();
+ 
+}
+
+void loop() {
+
+  float speed_fb = analogRead(speed_in);
+  if( sft_val == 0)
+    {
+      speed_fb = 0;
+    }else{}
+  
+  if( speed_fb >= 200 )
+  {
+       
+    // rising
+    if( change != 1 )
+    {
+        time_samp = micros();
+        period = (time_samp - old_time_samp)/1000;
+        f = 1/(period/1000);
+        old_time_samp = time_samp;
+        change = 1;
+    }else{}
+
+  }else if( speed_fb < 200 )
+  {
+   
+    // falling
+    if( change != 0 )
+    {
+        change = 0;
+    }else{}
+
+  }
+
+  currentMillis = millis();
+  if ( currentMillis - previousMillis > interval )
+  {
+    previousMillis = currentMillis;
+
+    // inputs reading
+    uint8_t fw_state = fw_val;
+    uint8_t rv_state = rv_val;
+    uint8_t sft_state = digitalRead(sft_in);
+
+    // calc rpm
+    rpm = ( (f * 60)/(ppr) ); // *60 to dtm the no. of pulses in a minute.  // ppr * gear_ratio
+
+    // calc km/hr calc
+    kmperhr = (float)(rpm * 60 * disperrev); // *60 --> hr , 0.1 is dummy
+
+    // change km/hr to 8-bit
+    currentSpeed = ((255/24)*kmperhr) ;
+    speed_mps = ( (kmperhr / 2 ) * 100 ); // *100 to keep last 2 digits // now it's kmperhr, without * (5/18)
+
+    if( currentSpeed > 255)
+    {
+      currentSpeed = 255;
+    }else{}
+
+    // PID part
+    // Gain choosing
+    if( sp_speed < 202)
+    {
+      Kp = 5.0; Ki = 0.0047; Kd = 3.0;
+    }else if( sp_speed >= 203 )
+    {
+      Kp = 3.3; Ki = 0.0040; Kd = 3.0;
+    }else
+    {
+      Kp = 0.0; Ki = 0.0; Kd = 0.0;
+    }
+   
+    adj_speed = speedControl(currentSpeed, sp_speed, currentMillis, sft_val);
+   
+    if( adj_speed > 255)
+    {
+      adj_speed = 254;
+    }else if( adj_speed < 0)
+    {
+      adj_speed = 0;
+    }else{}
+   
+    motorControl(fw_state, rv_state, sft_state);
+
+    // spin ros2 node
+    RCCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(1000)));
+  }
+
+
+}
+
+void motorControl(uint8_t fw_state, uint8_t rv_state, uint8_t sft_state)
+{
+ 
+  // forward status
+  if( ( fw_state == 1) && (rv_state == 0) )
+  {
+    digitalWrite(rv_out, LOW);
+    digitalWrite(fw_out, HIGH);
+  }
+   
+  // reverse status
+  if( ( rv_state == 1) && ( fw_state == 0) )
+  {
+    digitalWrite(fw_out, LOW);
+    digitalWrite(rv_out, HIGH);
+  }
+
+  // idle status
+  if( ( fw_state == 0) && ( rv_state == 0) )
+  {  
+    digitalWrite(fw_out, LOW);
+    digitalWrite(rv_out, LOW);
+    sft_val = 0;
+  }
+
+  // error status
+  if( (fw_state == 1) && ( rv_state == 1) )
+  {
+   
+  }
+
+  // checking safety pedal status
+  if(sft_state == 1)
+  {
+    sft_val = 1;
+    digitalWrite(sft_out, HIGH);
+    if( (first_drive==0) && (sft_state==1) )
+    {
+      first_drive=1;
+    }
+    Dpotwrite(adj_speed);
+  }else{
+    if( ( fw_state == 0) && ( rv_state == 0) )
+    {
+      digitalWrite(sft_out,LOW);  
+      speed_change=1;
+      Dpotwrite(0);  
+    }
+    if(first_drive == 2)
+    {
+      speed_change = 1;
+      Dpotwrite(adj_speed);
+    }
+  }
+ 
+}
+
+void Dpotwrite(uint8_t value_inp)
+{
+  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(mcor_out, LOW);
+  if(first_drive == 1)
+  {
+    SPI.transfer(address);
+    SPI.transfer(0);
+    first_drive = 2;
+    start = 1;
+    speed_change=0;
+  }
+  if( speed_change == 1)
+  {
+    SPI.transfer(address);
+    SPI.transfer(value_inp);
+  }
+  digitalWrite(mcor_out, HIGH);
+  SPI.endTransaction();
+}
+
+float speedControl(float current, float sp, long currentMillis, uint8_t sft_val )
+{
+  float error = sp - current;
+  dT = currentMillis - prev;
+  prev = currentMillis;
+
+  if( sft_val == 1 ) // driving
+  {
+   
+    //PID
+    sum_error = sum_error + ( error * dT);
+    adj_calc = ( Kp*error ) + ( Ki*sum_error ) + ( Kd * ((error-preverror)/dT) );
+    if( error < 0.1 && error > -1 )
+    {
+       adj_calc = prevadj;
+    }  
+   
+  }else
+  {
+      sum_error = 0.0;
+      adj_calc=0.0;
+  }
+
+  preverror = error;
+  prevadj = adj_calc;
+
+  return adj_calc;
+}
