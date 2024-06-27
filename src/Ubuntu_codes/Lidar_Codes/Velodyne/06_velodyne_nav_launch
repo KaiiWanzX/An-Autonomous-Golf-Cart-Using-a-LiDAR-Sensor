@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+
+def generate_launch_description():
+    # Launch arguments
+    use_sim_time = LaunchConfiguration('use_sim_time', default='false')
+    pbstream_map_file = '/home/pae/ros2_ws/src/cartographer_ros/cartographer_ros/map/velodyne/pbstream/06-05-67/testfb_1.pbstream'  # Path to your .pbstream map file
+    nav2_params_file = '/opt/ros/humble/share/nav2_bringup/params/nav2_params.yaml'
+    rviz_config_file = '/opt/ros/humble/share/nav2_bringup/rviz/nav2_default_view.rviz'
+
+    return LaunchDescription([
+        # Declare the use_sim_time argument
+        DeclareLaunchArgument(
+            'use_sim_time',
+            default_value='false',
+            description='Use simulation (Gazebo) clock if true'
+        ),
+
+	#velodyne
+	Node(
+            package='velodyne_driver',
+            executable='velodyne_driver_node',
+            name='velodyne_driver_node',
+            output='screen',
+            parameters=[
+                {'device_ip': '192.168.1.201'},  
+                {'frame_id': 'velodyne'},
+                {'model': 'VLP16'},
+            ],
+     ),
+
+        # Start the Cartographer node for localization
+        Node(
+            package='cartographer_ros',
+            executable='cartographer_node',
+            name='cartographer_node',
+            output='screen',
+            parameters=[
+                {'use_sim_time': use_sim_time},
+                {'configuration_directory': '/home/pae/ros2_ws/src/cartographer_ros/cartographer_ros/configuration_files/'},
+                {'configuration_basename': '3velodyne_16 _2d_2.lua'},  
+            ],
+            arguments=[
+                '-load_state_filename', pbstream_map_file
+            ]
+        ),
+
+        # Start the Nav2 map server
+        Node(
+            package='nav2_map_server',
+            executable='map_server',
+            name='map_server',
+            output='screen',
+            parameters=[
+                {'use_sim_time': use_sim_time},
+                {'yaml_filename': pbstream_map_file}, 
+                {'topic': 'map'}  
+            ]
+        ),
+
+        # Start the Nav2 stack
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource([FindPackageShare('nav2_bringup'), '/launch/bringup_launch.py']),
+            launch_arguments={'use_sim_time': use_sim_time, 'map': pbstream_map_file}.items(),
+        ),
+
+        # Start RViz for visualization
+        Node(
+            package='rviz2',
+            executable='rviz2',
+            name='rviz2',
+            output='screen',
+            arguments=['-d', rviz_config_file],
+            parameters=[{'use_sim_time': use_sim_time}]
+        ),
+    ])
+
+
+
