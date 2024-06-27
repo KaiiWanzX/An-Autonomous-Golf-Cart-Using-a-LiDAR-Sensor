@@ -1,7 +1,5 @@
-// PID Control with DIGI POT 5 click, analog read for speed feedback , fix the sft_val bug on 15/06/24
-// interfacing with ROS 2
+// interfacing with ROS 2 Humble
 // upload to arduino mkr zero
-
 #include <micro_ros_arduino.h>
 #include <stdio.h>
 #include <rcl/rcl.h>
@@ -9,7 +7,6 @@
 #include <rclc/rclc.h>
 #include <rclc/executor.h>
 #include <std_msgs/msg/int32.h>
-
 #include <SPI.h>
 
 // Ros 2 node part
@@ -28,7 +25,6 @@ rcl_timer_t pub_timer;
 #define LED_PIN 13
 
 // input pins
-#define mcor_in A0  // speed pedal outputs
 #define speed_in A1 // encoder
 #define fw_in 0     // forward gear
 #define rv_in 1     // baackward gear
@@ -39,7 +35,6 @@ rcl_timer_t pub_timer;
 #define fw_out 3
 #define rv_out 4
 #define mcor_out 5 // to generate mcor output
-
 /* NOTE:
  SI,MOSI  8
  CS 5 = mcor_out <pwm>
@@ -54,16 +49,14 @@ float old_time_samp=0.0;
 // feedback datas
 double period=0.0;
 double f=0.0; // frequency
-unsigned int ppr=25; // pulse per round/rev, randomly set to 500 xD //25
+unsigned int ppr=25; // pulse per round/rev
 unsigned int rpm=0; // round per minute
 float kmperhr=0.0;
 float km=0.0;
-float gear_ratio=9.5; // randomly set to 1
-float disperrev=0.001413; // in km
+float disperrev=0.001413; // km
 
 // driving part
-const byte address = 00010000; // B00010001 in binary, 0x11
-uint8_t speed_val = 150; // set point
+const byte address = 00010000; // for Digital Poten
 uint8_t fw_val=1;
 uint8_t rv_val=0;
 uint8_t sft_val;
@@ -78,7 +71,7 @@ float adj_speed=0.0;
 float adj_calc=0.0;
 long prev=0.0;
 long dT=0.0;
-float Kp=1.0; float Ki=1.0; float Kd=0.25; // old_Kp = 6.3, old_Ki = 0.0047, old_Kd = 4; Ziegler-Nichols Method gain-->3.5,0.0015,1.7
+float Kp=0.0; float Ki=0.0; float Kd=0.0;
 uint8_t kp_check=0;
 float preverror=0.0;
 float prevadj=0.0;
@@ -104,13 +97,9 @@ void subscription_callback(const void * msgin)
   digitalWrite(LED_PIN, (msg->data == 0) ? LOW : HIGH);  
 
   float speed_desired = msg->data;
-  if(speed_desired >= 0.0 && speed_desired <= 255.0 ) // speed's min and max == 80.0 && 220.0 respectively.
+  if(speed_desired >= 0.0 && speed_desired <= 255.0 )
   {
     sp_speed = speed_desired;
-    if( sp_speed >= 130.0)
-    {
-      sp_speed = 130.0;
-    }
   }else{
     digitalWrite(LED_PIN, HIGH);
     sp_speed = 0.0;
@@ -122,11 +111,8 @@ void publisher_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
   RCLC_UNUSED(last_call_time);
   if (timer != NULL)
   {
-    //pub_msg.data = kmperhr;
-    //pub_msg.data = sp_speed;
-    pub_msg.data = speed_mps;
+    pub_msg.data = kmperhr_pub;
     RCSOFTCHECK(rcl_publish(&publisher, &pub_msg, NULL));
-    //pub_msg.data++;
   }
 }
 
@@ -172,11 +158,9 @@ void setup() {
   RCCHECK(rclc_executor_init(&executor, &support.context, 2, &allocator));
   RCCHECK(rclc_executor_add_subscription(&executor, &subscriber, &sub_msg, &subscription_callback, ON_NEW_DATA));
   RCCHECK(rclc_executor_add_timer(&executor, &pub_timer));
-
   pub_msg.data = 0;
  
   /********** pinMode setting **********/
-  pinMode(mcor_in, INPUT);
   pinMode(sft_in, INPUT);
   pinMode(fw_in, INPUT);
   pinMode(rv_in, INPUT);
@@ -191,16 +175,14 @@ void setup() {
   digitalWrite(sft_out, LOW);
   digitalWrite(fw_out, LOW);
   digitalWrite(rv_out, LOW);
+  sft_val = 0;
 
   /********** SPI setting **********/
   digitalWrite(mcor_out, HIGH); // Active Low
-  sft_val = 0;
   SPI.begin();
- 
 }
 
 void loop() {
-
   float speed_fb = analogRead(speed_in);
   if( sft_val == 0)
     {
@@ -209,7 +191,6 @@ void loop() {
   
   if( speed_fb >= 200 )
   {
-       
     // rising
     if( change != 1 )
     {
@@ -221,14 +202,12 @@ void loop() {
     }else{}
 
   }else if( speed_fb < 200 )
-  {
-   
+  { 
     // falling
     if( change != 0 )
     {
         change = 0;
     }else{}
-
   }
 
   currentMillis = millis();
@@ -242,14 +221,14 @@ void loop() {
     uint8_t sft_state = digitalRead(sft_in);
 
     // calc rpm
-    rpm = ( (f * 60)/(ppr) ); // *60 to dtm the no. of pulses in a minute.  // ppr * gear_ratio
+    rpm = ( (f * 60)/(ppr) ); // *60 to dtm the no. of pulses in a minute. 
 
     // calc km/hr calc
-    kmperhr = (float)(rpm * 60 * disperrev); // *60 --> hr , 0.1 is dummy
+    kmperhr = (float)(rpm * 60 * disperrev); // *60 --> hr
 
     // change km/hr to 8-bit
     currentSpeed = ((255/24)*kmperhr) ;
-    speed_mps = ( (kmperhr / 2 ) * 100 ); // *100 to keep last 2 digits // now it's kmperhr, without * (5/18)
+    kmperhr_pub = ( (kmperhr / 2 ) * 100 ); // *100 to keep last 2 digits
 
     if( currentSpeed > 255)
     {
@@ -284,7 +263,6 @@ void loop() {
     // spin ros2 node
     RCCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(1000)));
   }
-
 
 }
 
@@ -391,6 +369,5 @@ float speedControl(float current, float sp, long currentMillis, uint8_t sft_val 
 
   preverror = error;
   prevadj = adj_calc;
-
   return adj_calc;
 }
